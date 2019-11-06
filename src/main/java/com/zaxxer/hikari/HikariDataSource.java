@@ -41,9 +41,18 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
 {
    private static final Logger LOGGER = LoggerFactory.getLogger(HikariDataSource.class);
 
+   /**
+    * 线程安全的连接池是否关闭的标识符
+    */
    private final AtomicBoolean isShutdown = new AtomicBoolean();
 
+   /**
+    * 通过传入的配置创建的实际连接池的对象引用
+    */
    private final HikariPool fastPathPool;
+   /**
+    * 通过自身的配置创建的实际连接池的对象引用，注意这里的volatile，这个是为双重检查锁定模式使用的
+    */
    private volatile HikariPool pool;
 
    /**
@@ -63,6 +72,10 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
    }
 
    /**
+    * 首先是对传入的配置参数进行检查是否符合要求，如果符合要求将参数复制到本对象中，
+    * 然后开始创建线程池，将创建的线程池的引用赋给fastPathPool，
+    * 然后将是否封闭的值改成true防止被恶意修改
+    *
     * Construct a HikariDataSource with the specified configuration.  The
     * {@link HikariConfig} is copied and the pool is started by invoking this
     * constructor.
@@ -88,6 +101,12 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
    //                          DataSource methods
    // ***********************************************************************
 
+   /**
+    * 首先检查该连接池是否已经关闭，就是成员变量的isShutdown的值。如果已经关闭，抛出已经关闭的异常。
+    * 如果连接池初始化成功的话，直接调用连接池的getConnection()方法返回。如果没有初始化，
+    * 那么通过自身的配置信息初始化一个数据库连接池赋给pool字段。然后用这个新创建的连接池返回连接。
+    * 这里代码那么长主要是因为用了双重检查锁定模式，防止在多线程的情况中初始化一个不完整的数据库连接池
+    */
    /** {@inheritDoc} */
    @Override
    public Connection getConnection() throws SQLException
@@ -100,6 +119,7 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
          return fastPathPool.getConnection();
       }
 
+      /** 双重检查锁 **/
       // See http://en.wikipedia.org/wiki/Double-checked_locking#Usage_in_Java
       HikariPool result = pool;
       if (result == null) {
@@ -178,6 +198,9 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
       throw new SQLFeatureNotSupportedException();
    }
 
+   /**
+    * 这个方法是为了将连接池转换成指定的数据库连接池类型，如果是的，进行强制转换后返回
+    */
    /** {@inheritDoc} */
    @Override
    @SuppressWarnings("unchecked")
@@ -202,6 +225,9 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
       throw new SQLException("Wrapped DataSource is not an instance of " + iface);
    }
 
+   /**
+    * 这个方法是来判断当前的对象是不是指定类的实例
+    */
    /** {@inheritDoc} */
    @Override
    public boolean isWrapperFor(Class<?> iface) throws SQLException
@@ -229,6 +255,10 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
    //                        HikariConfigMXBean methods
    // ***********************************************************************
 
+   /**
+    * 设置度量标准注册表，先调用父类HikariConfig的set方法来检查和设置，
+    * 如果没有问题、连接池也初始化完成并且没有设置过，就可以进行参数的设置
+    */
    /** {@inheritDoc} */
    @Override
    public void setMetricRegistry(Object metricRegistry)
@@ -288,6 +318,8 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
    // ***********************************************************************
 
    /**
+    * 检查连接池是否正在运行，判断条件是连接池存在并且状态是正常状态
+    *
     * Returns {@code true} if the pool as been started and is not suspended or shutdown.
     *
     * @return {@code true} if the pool as been started and is not suspended or shutdown.
@@ -320,6 +352,9 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
    }
 
    /**
+    * 将指定的连接从连接池中去除。判断条件是连接池没有关闭并且连接池存在并且这个连接是hikari数据库连接池的连接，
+    * 以上为真的情况下，调用HikariPool的方法去除该连接
+    *
     * Evict a connection from the pool.  If the connection has already been closed (returned to the pool)
     * this may result in a "soft" eviction; the connection will be evicted sometime in the future if it is
     * currently in use.  If the connection has not been closed, the eviction is immediate.
@@ -335,6 +370,8 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
    }
 
    /**
+    * 关闭连接池，先判断是否已经关闭，如果是的就结束，如果不是，调用HikariPool的shutdown()方法进行关闭
+    *
     * Shutdown the DataSource and its associated pool.
     */
    @Override

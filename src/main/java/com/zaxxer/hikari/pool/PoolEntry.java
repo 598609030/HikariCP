@@ -39,13 +39,17 @@ final class PoolEntry implements IConcurrentBagEntry
    private static final AtomicIntegerFieldUpdater<PoolEntry> stateUpdater;
 
    Connection connection;
+   /**上次访问毫秒数**/
    long lastAccessed;
+   /**上次借用毫秒数**/
    long lastBorrowed;
 
    @SuppressWarnings("FieldCanBeLocal")
    private volatile int state = 0;
+   /**是否已经移除出连接池**/
    private volatile boolean evict;
 
+   /**连接结束的最后回调**/
    private volatile ScheduledFuture<?> endOfLife;
 
    private final FastList<Statement> openStatements;
@@ -54,6 +58,7 @@ final class PoolEntry implements IConcurrentBagEntry
    private final boolean isReadOnly;
    private final boolean isAutoCommit;
 
+   /**静态块中就是对stateUpdater进行实例化，对state字段进行顺序更新**/
    static
    {
       stateUpdater = AtomicIntegerFieldUpdater.newUpdater(PoolEntry.class, "state");
@@ -70,6 +75,7 @@ final class PoolEntry implements IConcurrentBagEntry
    }
 
    /**
+    * 回收连接：如果连接存在，记录上次方法的时间戳，然后调用连接池的方法回收连接
     * Release this entry back to the pool.
     *
     * @param lastAccessed last access time-stamp
@@ -83,6 +89,7 @@ final class PoolEntry implements IConcurrentBagEntry
    }
 
    /**
+    * 设置调度任务的回调
     * Set the end of life {@link ScheduledFuture}.
     *
     * @param endOfLife this PoolEntry/Connection's end of life {@link ScheduledFuture}
@@ -92,11 +99,13 @@ final class PoolEntry implements IConcurrentBagEntry
       this.endOfLife = endOfLife;
    }
 
+   /**传入普通的连接创建一个代理连接**/
    Connection createProxyConnection(final ProxyLeakTask leakTask, final long now)
    {
       return ProxyFactory.getProxyConnection(this, connection, openStatements, leakTask, now, isReadOnly, isAutoCommit);
    }
 
+   /**重置连接的状态，里面的方法涉及到位运算，为了提高运算效率**/
    void resetConnectionState(final ProxyConnection proxyConnection, final int dirtyBits) throws SQLException
    {
       hikariPool.resetConnectionState(connection, proxyConnection, dirtyBits);
@@ -107,21 +116,25 @@ final class PoolEntry implements IConcurrentBagEntry
       return hikariPool.toString();
    }
 
+   /**判断该连接是否已经被连接池移出**/
    boolean isMarkedEvicted()
    {
       return evict;
    }
 
+   /**标记成已移除，将evict标成true**/
    void markEvicted()
    {
       this.evict = true;
    }
 
+   /**移除连接，调用的是连接池的closeConnection()方法，同时记录了关闭原因**/
    void evict(final String closureReason)
    {
       hikariPool.closeConnection(this, closureReason);
    }
 
+   /**计算上次使用该连接到现在共花费了多少毫秒**/
    /** Returns millis since lastBorrowed */
    long getMillisSinceBorrowed()
    {
@@ -163,6 +176,7 @@ final class PoolEntry implements IConcurrentBagEntry
       stateUpdater.set(this, update);
    }
 
+   /**关闭连接，检查连接的最后回调是否完成，如果没有完成那么输出日志，然后将连接和回调置空后返回连接的引用**/
    Connection close()
    {
       ScheduledFuture<?> eol = endOfLife;

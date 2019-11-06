@@ -43,6 +43,14 @@ import org.slf4j.LoggerFactory;
 import com.zaxxer.hikari.util.ConcurrentBag.IConcurrentBagEntry;
 
 /**
+ * 这是一个专门的并发包，可以为连接池实现LinkedBlockingQueue和LinkedTransferQueue的卓越性能。
+ * 它尽可能使用ThreadLocal存储来避免锁定，但如果ThreadLocal列表中没有可用的项目，则会使用它来扫描公共集合。
+ * 当借用线程没有自己的东西时，ThreadLocal列表中的未使用项可能被“窃取”。
+ * 它是一个“无锁”实现，使用专门的AbstractQueuedLongSynchronizer来管理跨线程信令。
+ *
+ * 请注意，从包中“借用”的项目实际上并未从任何集合中删除，因此即使放弃引用也不会发生垃圾收集。
+ * 因此，必须小心“回收”“借用”借来的对象，否则将导致内存泄漏。 只有“删除”方法才能从包中完全删除对象。
+ *
  * This is a specialized concurrent bag that achieves superior performance
  * to LinkedBlockingQueue and LinkedTransferQueue for the purposes of a
  * connection pool.  It uses ThreadLocal storage when possible to avoid
@@ -66,12 +74,18 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
 {
    private static final Logger LOGGER = LoggerFactory.getLogger(ConcurrentBag.class);
 
+   /**共享元素的集合,就是连接的集合**/
    private final CopyOnWriteArrayList<T> sharedList;
+   /**是否是弱引用ThreadLocal**/
    private final boolean weakThreadLocals;
 
+   /**线程持有的成员变量是一个List的借用元素集合**/
    private final ThreadLocal<List<Object>> threadList;
+   /**Bag状态监听器接口**/
    private final IBagStateListener listener;
+   /**原子类，等待者数量**/
    private final AtomicInteger waiters;
+   /**volatile类型，并发包是否关闭**/
    private volatile boolean closed;
 
    private final SynchronousQueue<T> handoffQueue;
@@ -115,6 +129,15 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 方法调用传入的两个参数，一个是等待时间的长度，一个是等待时间的单位，如果想要“借”的时间超时，就直接返回null。
+    * 首先在threadlocal的list从后往前遍历，通过list.remove()方法取出连接后，检查是不是弱引用，如果是弱引用就强转成弱引用。
+    * 然后检查这个连接是不是空，或者状态是不是未使用状态，如果是的，将该连接的状态改成正在使用，并且返回连接。
+    *
+    * 如果在threadlocal的list中没有找到，那么先把等待者的计数器+1，然后sharedList进行遍历查找连接，
+    * 如果里面有未使用的连接，那么将这个连接状态改成正在使用，然后将等待者的计数器-1。
+    *
+    * 如果还是得不到连接，那么开始循环，直到时间小于10秒钟。循环中一直从handoffQueue中获取连接。
+    *
     * The method will borrow a BagEntry from the bag, blocking for the
     * specified timeout if none are available.
     *
@@ -170,6 +193,10 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 回收（归还）连接
+    * 首先将连接的状态改成未使用，然后遍历等待者，如果存在需要使用连接的等待者，那么直接放到handoffQueue中给借用者使用。
+    * 如果没有，将该线程阻塞10ms。最后是如果当前线程的连接数少于50条，那么将这个线程加入到该线程的threadlocal中
+    *
     * This method will return a borrowed object to the bag.  Objects
     * that are borrowed from the bag but never "requited" will result
     * in a memory leak.
@@ -201,6 +228,10 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 添加连接方法
+    * 首先要检查是不是已经关闭了，如果被关闭了就不能添加。如果没有关闭，可以在sharedList中增加此连接。
+    * 如果有消费者在等待并且该连接的状态是未使用并且handoffQueue中不能添加这个连接，那么这个添加线程先休息
+    *
     * Add a new object to the bag for others to borrow.
     *
     * @param bagEntry an object to add to the bag
@@ -221,6 +252,10 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 移除连接方法
+    * 如果这个连接的状态不能从正在使用状态改成移除状态，并且不能从保留状态改成移除状态，并且没有关闭，那么移除失败。
+    * 然后尝试从sharedList移除这个连接，最后返回list.remove()方法的结果
+    *
     * Remove a value from the bag.  This method should only be called
     * with objects obtained by <code>borrow(long, TimeUnit)</code> or <code>reserve(T)</code>
     *
@@ -245,6 +280,8 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 关闭方法就是将closed的值改成true
+    *
     * Close the bag to further adds.
     */
    @Override
@@ -254,6 +291,8 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 找出sharedList中指定状态的所有连接
+    *
     * This method provides a "snapshot" in time of the BagEntry
     * items in the bag in the specified state.  It does not "lock"
     * or reserve items in any way.  Call <code>reserve(T)</code>
@@ -270,6 +309,8 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 没有指定状态，那么将sharedList的复制返回
+    *
     * This method provides a "snapshot" in time of the bag items.  It
     * does not "lock" or reserve items in any way.  Call <code>reserve(T)</code>
     * on items in the list, or understand the concurrency implications of
@@ -284,6 +325,9 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 保留
+    * 这个方法是将连接的状态从未使用改成保留，这样就不会被借出去。这个方法主要用于使用values(int)方法，保留的连接可以被删除
+    *
     * The method is used to make an item in the bag "unavailable" for
     * borrowing.  It is primarily used when wanting to operate on items
     * returned by the <code>values(int)</code> method.  Items that are
@@ -301,6 +345,8 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 将连接的状态从保留改成未使用，这样就变得可用，可以让别的线程“借用”
+    *
     * This method is used to make an item reserved via <code>reserve(T)</code>
     * available again for borrowing.
     *
@@ -320,6 +366,8 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 获取从等待到借用到连接的花费时间
+    *
     * Get the number of threads pending (waiting) for an item from the
     * bag to become available.
     *
@@ -331,6 +379,8 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 统计这次调用时指定状态的连接数
+    *
     * Get a count of the number of items in the specified state at the time of this call.
     *
     * @param state the state of the items to count
@@ -360,6 +410,8 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
    }
 
    /**
+    * 获取共享连接数
+    *
     * Get the total number of items in the bag.
     *
     * @return the number of items in the bag
@@ -369,6 +421,7 @@ public class ConcurrentBag<T extends IConcurrentBagEntry> implements AutoCloseab
       return sharedList.size();
    }
 
+   /**输出共享连接集合中的所有连接到日志**/
    public void dumpState()
    {
       sharedList.forEach(entry -> LOGGER.info(entry.toString()));
